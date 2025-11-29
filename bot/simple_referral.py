@@ -14,7 +14,6 @@ class SimpleReferralSystem:
             try:
                 bot_info = await bot.get_me()
                 self.bot_username_cache = bot_info.username
-                logging.info(f"Bot username: {self.bot_username_cache}")
             except Exception as e:
                 logging.error(f"Error getting bot username: {e}")
         return self.bot_username_cache
@@ -22,7 +21,6 @@ class SimpleReferralSystem:
     def get_referral_id(self, args: str) -> int:
         """Парсит реферальный ID из аргументов команды /start"""
         try:
-            logging.info(f"Parsing referral args: '{args}'")
 
             if not args:
                 return None
@@ -33,12 +31,10 @@ class SimpleReferralSystem:
                 ref_id_str = args[4:]  # убираем 'ref_'
                 if ref_id_str.isdigit():
                     referrer_id = int(ref_id_str)
-                    logging.info(f"Referral ID parsed (ref_ format): {referrer_id}")
                     return referrer_id
             elif args.isdigit():
                 # Формат: /start 123456 (для обратной совместимости)
                 referrer_id = int(args)
-                logging.info(f"Referral ID parsed (digits only): {referrer_id}")
                 return referrer_id
 
         except (ValueError, TypeError) as e:
@@ -50,7 +46,6 @@ class SimpleReferralSystem:
         referral_id = self.get_referral_id(args)
         is_new_user = False
 
-        logging.info(f"Start command: user_id={user_id}, username={username}, args='{args}', referral_id={referral_id}")
 
         async with AsyncSessionLocal() as session:
             # Проверяем существующего пользователя
@@ -66,7 +61,7 @@ class SimpleReferralSystem:
                 session.add(user)
                 await session.commit()
                 is_new_user = True
-                logging.info(f"New user created: {user_id} with referrer: {referral_id}")
+                logging.info(f"Новый пользователь: UserID={user_id}, ReferrerID={referral_id}")
 
                 # Обрабатываем реферала если есть refer_id
                 if referral_id:
@@ -82,7 +77,6 @@ class SimpleReferralSystem:
                 if user.username != current_username:
                     user.username = current_username
                     await session.commit()
-                    logging.info(f"User username updated: {user_id} -> @{current_username}")
 
             return user, referral_id, is_new_user
 
@@ -102,7 +96,6 @@ class SimpleReferralSystem:
                 existing = existing_result.scalar_one_or_none()
 
                 if existing:
-                    logging.info(f"Referral already exists: {referrer_id} -> {referred_id}")
                     return True
 
                 # Создаем запись о реферале
@@ -118,11 +111,10 @@ class SimpleReferralSystem:
                 # Автоматический VIP за 20 рефералов
                 if referrer.referrals_count >= 20 and referrer.privilege == "user":
                     referrer.privilege = "vip"
-                    logging.info(f"User {referrer_id} got VIP for 20 referrals")
+                    logging.info(f"Пользователь получил VIP за 20 рефералов: UserID={referrer_id}")
 
                 await session.commit()
-                logging.info(
-                    f"Referral added successfully: {referrer_id} -> {referred_id}, total: {referrer.referrals_count}")
+                logging.info(f"Реферал добавлен: ReferrerID={referrer_id}, ReferredID={referred_id}, Всего={referrer.referrals_count}")
                 return True
 
             except Exception as e:
@@ -157,7 +149,6 @@ class SimpleReferralSystem:
             )
 
             await bot.send_message(referrer_id, message, parse_mode="HTML")
-            logging.info(f"📩 Notification sent to referrer {referrer_id} about new referral {new_user_id}")
 
         except Exception as e:
             logging.error(f"Failed to notify referrer {referrer_id}: {e}")
@@ -169,7 +160,6 @@ class SimpleReferralSystem:
             return "❌ Ошибка: username бота не найден"
 
         link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-        logging.info(f"Generated referral link for {user_id}: {link}")
         return link
 
     async def get_referral_link(self, user_id: int, bot: Bot = None) -> str:
@@ -259,7 +249,7 @@ class SimpleReferralSystem:
             if user.referrals_count >= 20 and user.privilege == "user":
                 user.privilege = "vip"
                 await session.commit()
-                logging.info(f"User {user_id} automatically promoted to VIP for {user.referrals_count} referrals")
+                logging.info(f"Автоматическое повышение до VIP: UserID={user_id}, Рефералов={user.referrals_count}")
                 return True
 
             return False

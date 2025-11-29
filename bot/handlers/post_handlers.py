@@ -19,7 +19,6 @@ post_service = PostService()
 @router.callback_query(F.data == "sell")
 async def start_sell(callback: CallbackQuery, state: FSMContext):
     try:
-        logging.info(f"🔘 Callback 'sell' от пользователя {callback.from_user.id}")
         
         # Проверка бана
         if callback.from_user.id not in config.ADMIN_IDS:
@@ -41,15 +40,20 @@ async def start_sell(callback: CallbackQuery, state: FSMContext):
 
         await callback.answer()  # Убираем индикатор загрузки
         
-        await callback.message.answer(
+        instruction_msg = await callback.message.answer(
             "📸 <b>Пришлите 1 фотографию товара</b>\n\n"
             "Отправьте одно фото товара для объявления.\n\n"
             "<i>После отправки фото автоматически перейдем к следующему шагу</i>",
             reply_markup=cancel_keyboard(),
             parse_mode="HTML"
         )
+        # Сохраняем message_id инструкции в state для последующего удаления
+        await state.update_data(
+            instruction_message_id=instruction_msg.message_id,
+            form_message_ids=[instruction_msg.message_id],  # Начинаем список сообщений формы
+            last_photo_processed=0
+        )
         await state.set_state(SellItem.photos)
-        await state.update_data(last_photo_processed=0)
 
     except Exception as e:
         logging.error(f"Ошибка начала продажи для пользователя {callback.from_user.id}: {e}", exc_info=True)
@@ -75,13 +79,24 @@ async def process_photos(message: Message, state: FSMContext):
         photo = message.photo[-1]
         photo_id = photo.file_id
 
-        await state.update_data(photo_ids=[photo_id])
+        # Сохраняем message_id фото для последующего удаления
+        data = await state.get_data()
+        form_message_ids = data.get('form_message_ids', [])
+        form_message_ids.append(message.message_id)  # Добавляем сообщение с фото
+        await state.update_data(photo_ids=[photo_id], form_message_ids=form_message_ids)
 
-        await message.answer(
-            "✅ <b>Фото добавлено</b>\n\n"
-            "📝 Теперь введите название товара:",
+        # Отправляем сообщение с инструкцией и сохраняем его message_id
+        from message_cleaner import message_cleaner
+        instruction_msg = await message.bot.send_message(
+            chat_id=message.from_user.id,
+            text="✅ <b>Фото добавлено</b>\n\n📝 Теперь введите название товара:",
             parse_mode="HTML"
         )
+        # Добавляем message_id в список сообщений формы
+        data = await state.get_data()
+        form_message_ids = data.get('form_message_ids', [])
+        form_message_ids.append(instruction_msg.message_id)
+        await state.update_data(instruction_message_id=instruction_msg.message_id, form_message_ids=form_message_ids)
         await state.set_state(SellItem.title)
 
     except Exception as e:
@@ -97,11 +112,32 @@ async def process_photos_invalid(message: Message):
 @router.message(SellItem.title)
 async def process_title(message: Message, state: FSMContext):
     if len(message.text) < 5:
-        await message.answer("❌ Название должно быть не менее 5 символов:")
+        from message_cleaner import message_cleaner
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            "❌ Название должно быть не менее 5 символов:",
+            delete_after=5
+        )
         return
 
-    await state.update_data(title=message.text)
-    await message.answer("💰 Введите цену в рублях (или 'торг'):")
+    # НЕ удаляем сообщения на промежуточных шагах - только сохраняем message_id
+    from message_cleaner import message_cleaner
+    data = await state.get_data()
+    
+    # Сохраняем message_id сообщения пользователя с названием
+    form_message_ids = data.get('form_message_ids', [])
+    form_message_ids.append(message.message_id)
+    await state.update_data(title=message.text, form_message_ids=form_message_ids)
+    instruction_msg = await message.bot.send_message(
+        chat_id=message.from_user.id,
+        text="💰 Введите цену в рублях (или 'торг'):"
+    )
+    # Добавляем message_id в список сообщений формы
+    data = await state.get_data()
+    form_message_ids = data.get('form_message_ids', [])
+    form_message_ids.append(instruction_msg.message_id)
+    await state.update_data(instruction_message_id=instruction_msg.message_id, form_message_ids=form_message_ids)
     await state.set_state(SellItem.price)
 
 
@@ -109,17 +145,42 @@ async def process_title(message: Message, state: FSMContext):
 async def process_price(message: Message, state: FSMContext):
     price_text = message.text.strip().lower()
 
+    # НЕ удаляем сообщения на промежуточных шагах - только сохраняем message_id
+    from message_cleaner import message_cleaner
+    data = await state.get_data()
+    
+    # Сохраняем message_id сообщения пользователя с ценой
+    form_message_ids = data.get('form_message_ids', [])
+    form_message_ids.append(message.message_id)
+    await state.update_data(form_message_ids=form_message_ids)
+
     # Проверяем на "торг"
     if price_text == "торг":
         await state.update_data(price="торг")
-        await message.answer("📄 Введите описание товара:")
+        instruction_msg = await message.bot.send_message(
+            chat_id=message.from_user.id,
+            text="📄 Введите описание товара:"
+        )
+        # Добавляем message_id в список сообщений формы
+        data = await state.get_data()
+        form_message_ids = data.get('form_message_ids', [])
+        form_message_ids.append(instruction_msg.message_id)
+        await state.update_data(instruction_message_id=instruction_msg.message_id, form_message_ids=form_message_ids)
         await state.set_state(SellItem.description)
         return
 
     # Проверяем на "бесплатно" или "даром"
     if price_text in ["бесплатно", "даром", "0"]:
         await state.update_data(price="бесплатно")
-        await message.answer("📄 Введите описание товара:")
+        instruction_msg = await message.bot.send_message(
+            chat_id=message.from_user.id,
+            text="📄 Введите описание товара:"
+        )
+        # Добавляем message_id в список сообщений формы
+        data = await state.get_data()
+        form_message_ids = data.get('form_message_ids', [])
+        form_message_ids.append(instruction_msg.message_id)
+        await state.update_data(instruction_message_id=instruction_msg.message_id, form_message_ids=form_message_ids)
         await state.set_state(SellItem.description)
         return
 
@@ -134,33 +195,76 @@ async def process_price(message: Message, state: FSMContext):
         if price_num > 0:
             # Сохраняем ЧИСТУЮ цифру, без "руб"
             await state.update_data(price=str(price_num))
-            await message.answer("📄 Введите описание товара:")
+            instruction_msg = await message.bot.send_message(
+                chat_id=message.from_user.id,
+                text="📄 Введите описание товара:"
+            )
+            # Добавляем message_id в список сообщений формы
+            data = await state.get_data()
+            form_message_ids = data.get('form_message_ids', [])
+            form_message_ids.append(instruction_msg.message_id)
+            await state.update_data(instruction_message_id=instruction_msg.message_id, form_message_ids=form_message_ids)
             await state.set_state(SellItem.description)
             return
         else:
-            await message.answer("❌ Цена должна быть больше 0. Введите цену цифрами или 'торг':")
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Цена должна быть больше 0. Введите цену цифрами или 'торг':",
+                delete_after=5
+            )
             return
 
     # Если не цифры и не торг - ошибка
-    await message.answer(
+    from message_cleaner import message_cleaner
+    await message_cleaner.send_temp_message(
+        message.bot,
+        message.from_user.id,
         "❌ Неверный формат цены.\n\n"
         "✅ <b>Допустимые форматы:</b>\n"
         "• <b>1500</b> (только цифры)\n"
         "• <b>торг</b>\n"
         "• <b>бесплатно</b>",
+        delete_after=8,
         parse_mode="HTML"
     )
 
 
 @router.message(SellItem.description)
 async def process_description(message: Message, state: FSMContext):
+    # Удаляем предыдущие сообщения формы
+    from message_cleaner import message_cleaner
+    # НЕ удаляем сообщения на промежуточных шагах - только сохраняем message_id
+    data = await state.get_data()
+    
+    # Сохраняем message_id сообщения пользователя с описанием
+    form_message_ids = data.get('form_message_ids', [])
+    form_message_ids.append(message.message_id)
+    await state.update_data(form_message_ids=form_message_ids)
+    
     if len(message.text) < 10:
-        await message.answer("❌ Описание должно быть не менее 10 символов:")
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            "❌ Описание должно быть не менее 10 символов:",
+            delete_after=5
+        )
         return
 
     await state.update_data(description=message.text)
 
     data = await state.get_data()
+    
+    # Удаляем все промежуточные сообщения формы перед показом превью
+    form_messages = data.get('form_message_ids', [])
+    if form_messages:
+        await message_cleaner.delete_multiple_messages(
+            message.bot,
+            message.from_user.id,
+            form_messages
+        )
+        await state.update_data(form_message_ids=[])  # Очищаем список
+    
     user_profile = await user_service.get_user_profile(message.from_user.id)
 
     # Безопасное получение username

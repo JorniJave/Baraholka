@@ -37,13 +37,26 @@ class UserService:
             if not user:
                 # Если пользователь не найден, создаем его с реальным username
                 actual_username = "без username"
-                # Не используем bot здесь, так как он может быть не инициализирован
+                if hasattr(self, 'bot'):
+                    try:
+                        user_info = await self.bot.get_chat(user_id)
+                        actual_username = user_info.username or "без username"
+                    except:
+                        actual_username = "без username"
 
                 user = User(id=user_id, username=actual_username)
                 session.add(user)
                 await session.commit()
+                logging.info(f"Создан новый пользователь при запросе профиля: {user_id}")
 
-            # Вычисляем cooldown (даже для забаненных, чтобы админы видели полную информацию)
+            # ✅ ПРОВЕРЯЕМ БАН ПОЛЬЗОВАТЕЛЯ
+            if user.banned:
+                return {
+                    'banned': True,
+                    'username': user.username,
+                    'user_id': user.id
+                }
+
             cooldown = await self._calculate_cooldown(user)
 
             # Используем новую систему для получения статистики
@@ -60,8 +73,6 @@ class UserService:
             if not actual_username or actual_username == "unknown":
                 actual_username = "без username"
 
-            # ✅ ВОЗВРАЩАЕМ ПОЛНЫЙ ПРОФИЛЬ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ (включая забаненных)
-            # Это нужно для админ-панели, чтобы можно было видеть всю информацию о пользователе
             return {
                 'username': actual_username,
                 'user_id': user.id,
@@ -98,11 +109,7 @@ class UserService:
         """Проверяет, забанен ли пользователь"""
         async with AsyncSessionLocal() as session:
             user = await session.get(User, user_id)
-            if not user:
-                return False
-            # Явно проверяем значение banned
-            is_banned = bool(user.banned) if user.banned is not None else False
-            return is_banned
+            return user.banned if user else False
 
     async def ban_user(self, user_id: int) -> bool:
         """Банит пользователя"""
@@ -111,7 +118,7 @@ class UserService:
             if user:
                 user.banned = True
                 await session.commit()
-                logging.info(f"Пользователь забанен: UserID={user_id}")
+                logging.info(f"Пользователь забанен: {user_id}")
                 return True
             return False
 
@@ -122,7 +129,7 @@ class UserService:
             if user:
                 user.banned = False
                 await session.commit()
-                logging.info(f"Пользователь разбанен: UserID={user_id}")
+                logging.info(f"Пользователь разбанен: {user_id}")
                 return True
             return False
 
@@ -136,7 +143,7 @@ class UserService:
                 user.last_post_time = None
                 user.privilege = "user"
                 await session.commit()
-                logging.warning(f"Аккаунт пользователя обнулен: UserID={user_id}")
+                logging.info(f"Аккаунт пользователя обнулен: {user_id}")
                 return True
             return False
 
@@ -147,6 +154,7 @@ class UserService:
             if user:
                 user.last_post_time = None
                 await session.commit()
+                logging.info(f"Кулдаун пользователя сброшен: {user_id}")
                 return True
             return False
 
@@ -166,16 +174,7 @@ class UserService:
 
 class PostService:
     def __init__(self):
-        self._bot = None
-    
-    @property
-    def bot(self):
-        """Ленивая инициализация бота"""
-        if self._bot is None:
-            if not config.BOT_TOKEN:
-                raise ValueError("BOT_TOKEN не установлен! Создайте файл .env с токеном бота.")
-            self._bot = Bot(token=config.BOT_TOKEN)
-        return self._bot
+        self.bot = Bot(token=config.BOT_TOKEN)
 
     async def create_post(self, user_id: int, data: dict):
         async with AsyncSessionLocal() as session:
@@ -197,51 +196,24 @@ class PostService:
 
     async def format_post_text(self, post_data: dict, user_privilege: str, include_contact_info: bool = False):
         privilege_label = config.PRIVILEGES[user_privilege]["label"]
-        
-        # Определяем цвет и стиль для привилегии
-        privilege_emoji = {
-            "user": "👤",
-            "vip": "💎",
-            "premium": "⭐",
-            "god": "👑",
-            "ultra_seller": "🔥"
-        }
-        privilege_emoji_icon = privilege_emoji.get(user_privilege, "⭐")
 
         # Форматируем цену для отображения
         price_display = post_data['price']
-        price_line = ""
 
-        # Если цена - "торг" или "бесплатно", показываем просто текст без "Цена:"
-        if price_display.lower() == "торг":
-            price_line = "🤝 <b>Торг</b>"
-        elif price_display.lower() == "бесплатно":
-            price_line = "🎁 <b>Бесплатно</b>"
-        elif price_display.isdigit():
-            # Если цена - цифры, показываем с "Цена:"
-            price_line = f"💰 <b>Цена:</b> <code>{price_display}</code> ₽"
-        else:
-            # На всякий случай, если что-то другое
-            price_line = f"💰 <b>Цена:</b> {price_display}"
+        # Если цена - цифры, добавляем "руб", если "торг" или "бесплатно" - оставляем как есть
+        if price_display.isdigit():
+            price_display = f"{price_display} руб"
 
-        # Красивое оформление поста
         text = f"""
-━━━━━━━━━━━━━━━━━━━━
-<b>📦 {post_data['title']}</b>
-━━━━━━━━━━━━━━━━━━━━
+    <b>{post_data['title']}</b>
 
-{price_line}
+    💰 <b>Цена:</b> {price_display}
 
-━━━━━━━━━━━━━━━━━━━━
-<b>📝 Описание:</b>
-━━━━━━━━━━━━━━━━━━━━
+    📝 <b>Описание:</b>
+    {post_data['description']}
 
-{post_data['description']}
-
-━━━━━━━━━━━━━━━━━━━━
-{privilege_emoji_icon} <b>Статус продавца:</b> {privilege_label}
-━━━━━━━━━━━━━━━━━━━━
-"""
+    ⭐ <b>Привилегия продавца:</b> {privilege_label}
+    """
 
         # Добавляем контактную информацию в текст поста
         if include_contact_info:
@@ -384,7 +356,7 @@ class TicketService:
                 await session.execute(stmt)
 
                 await session.commit()
-                logging.info(f"Тикет удален: #{ticket_id}")
+                logging.info(f"Тикет {ticket_id} успешно удален")
                 return True
         except Exception as e:
             logging.error(f"Ошибка удаления тикета {ticket_id}: {e}")
@@ -394,6 +366,7 @@ class TicketService:
 class AdminService:
     async def is_admin(self, user_id: int):
         is_admin = user_id in config.ADMIN_IDS
+        logging.info(f"Проверка админа: user_id={user_id}, result={is_admin}, allowed_ids={config.ADMIN_IDS}")
         return is_admin
 
     async def get_statistics(self):

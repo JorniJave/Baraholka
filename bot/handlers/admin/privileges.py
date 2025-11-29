@@ -185,6 +185,8 @@ async def custom_price_input(callback: CallbackQuery, state: FSMContext):
         text += "Отправьте число (только цифры):"
 
         await callback.message.edit_text(text, parse_mode="HTML")
+        # Сохраняем message_id инструкции в state для последующего удаления
+        await state.update_data(instruction_message_id=callback.message.message_id)
 
     except Exception as e:
         logging.error(f"Ошибка запроса кастомной цены: {e}")
@@ -211,6 +213,8 @@ async def custom_cooldown_input(callback: CallbackQuery, state: FSMContext):
         text += "Отправьте число (минуты, только цифры):"
 
         await callback.message.edit_text(text, parse_mode="HTML")
+        # Сохраняем message_id инструкции в state для последующего удаления
+        await state.update_data(instruction_message_id=callback.message.message_id)
 
     except Exception as e:
         logging.error(f"Ошибка запроса кастомного кулдауна: {e}")
@@ -229,14 +233,30 @@ async def process_custom_price(message: Message, state: FSMContext):
         data = await state.get_data()
         privilege_type = data.get('privilege_type')
 
+        # Удаляем предыдущие сообщения формы
+        from message_cleaner import message_cleaner
+        data = await state.get_data()
+        instruction_message_id = data.get('instruction_message_id')
+        await message_cleaner.delete_form_messages(message.bot, message, instruction_message_id)
+
         if not message.text.isdigit():
-            await message.answer("❌ Введите только цифры:")
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Введите только цифры:",
+                delete_after=5
+            )
             return
 
         price = int(message.text)
 
         if price <= 0:
-            await message.answer("❌ Цена должна быть больше 0:")
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Цена должна быть больше 0:",
+                delete_after=5
+            )
             return
 
         # ✅ ОБНОВЛЯЕМ ЦЕНУ В КОНФИГЕ
@@ -244,7 +264,12 @@ async def process_custom_price(message: Message, state: FSMContext):
 
         privilege_info = config.PRIVILEGES[privilege_type]
 
-        await message.answer(f"✅ Цена для {privilege_info['label']} установлена: {price} руб")
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            f"✅ Цена для {privilege_info['label']} установлена: {price} руб",
+            delete_after=5
+        )
 
         # Возвращаемся к редактированию привилегии
         await edit_privilege_from_message(message, privilege_type)
@@ -269,14 +294,30 @@ async def process_custom_cooldown(message: Message, state: FSMContext):
         data = await state.get_data()
         privilege_type = data.get('privilege_type')
 
+        # Удаляем предыдущие сообщения формы
+        from message_cleaner import message_cleaner
+        data = await state.get_data()
+        instruction_message_id = data.get('instruction_message_id')
+        await message_cleaner.delete_form_messages(message.bot, message, instruction_message_id)
+
         if not message.text.isdigit():
-            await message.answer("❌ Введите только цифры:")
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Введите только цифры:",
+                delete_after=5
+            )
             return
 
         cooldown = int(message.text)
 
         if cooldown <= 0:
-            await message.answer("❌ Кулдаун должен быть больше 0:")
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Кулдаун должен быть больше 0:",
+                delete_after=5
+            )
             return
 
         # ✅ ОБНОВЛЯЕМ КУЛДАУН В КОНФИГЕ
@@ -284,7 +325,13 @@ async def process_custom_cooldown(message: Message, state: FSMContext):
 
         privilege_info = config.PRIVILEGES[privilege_type]
 
-        await message.answer(f"✅ Кулдаун для {privilege_info['label']} установлен: {cooldown} мин")
+        from message_cleaner import message_cleaner
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            f"✅ Кулдаун для {privilege_info['label']} установлен: {cooldown} мин",
+            delete_after=5
+        )
 
         # Возвращаемся к редактированию привилегии
         await edit_privilege_from_message(message, privilege_type)

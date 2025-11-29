@@ -22,7 +22,6 @@ async def admin_panel(message: Message):
             return
 
         await message.answer("⚙️ Панель администратора:", reply_markup=admin_menu())
-        logging.info(f"Открыта админ-панель: UserID={user_id}")
     except Exception as e:
         logging.error(f"Ошибка админ-панели: {e}")
         await message.answer("❌ Ошибка доступа к админ-панели")
@@ -31,7 +30,6 @@ async def admin_panel(message: Message):
 @router.callback_query(F.data == "admin_main")
 async def admin_main_panel(callback: CallbackQuery):
     try:
-        logging.info(f"🔘 Callback 'admin_main' от пользователя {callback.from_user.id}")
         
         user_id = callback.from_user.id
         if not await admin_service.is_admin(user_id):

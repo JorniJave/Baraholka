@@ -16,3 +16,4 @@ if ($pythonProcesses) {
 
 Write-Host "`n💡 Теперь можно запустить бота командой: python bot.py" -ForegroundColor Cyan
 
+

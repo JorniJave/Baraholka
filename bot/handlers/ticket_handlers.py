@@ -4,6 +4,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 import logging
+import asyncio
 
 from config import config
 from services import UserService, TicketService, AdminService
@@ -22,15 +23,6 @@ admin_service = AdminService()
 @router.callback_query(F.data == "help")
 async def show_help(callback: CallbackQuery):
     try:
-        logging.info(f"🔘 Callback 'help' от пользователя {callback.from_user.id}")
-        
-        # Проверка бана
-        if callback.from_user.id not in config.ADMIN_IDS:
-            is_banned = await user_service.is_user_banned(callback.from_user.id)
-            if is_banned:
-                await callback.answer("🚫 Вы заблокированы и не можете использовать бота.", show_alert=True)
-                return
-        
         # Сначала убедимся, что пользователь существует
         await user_service.get_or_create_user(callback.from_user.id, callback.from_user.username)
 
@@ -44,10 +36,9 @@ async def show_help(callback: CallbackQuery):
         if ticket_count > 0:
             keyboard.inline_keyboard.insert(0, [InlineKeyboardButton(text="📋 Мои тикеты", callback_data="my_tickets")])
 
-        await callback.answer()  # Убираем индикатор загрузки
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception as e:
-        logging.error(f"Ошибка показа помощи для пользователя {callback.from_user.id}: {e}", exc_info=True)
+        logging.error(f"Ошибка показа помощи для пользователя {callback.from_user.id}: {e}")
         await callback.answer("❌ Ошибка загрузки меню", show_alert=True)
 
 
@@ -68,6 +59,23 @@ async def show_privileges_menu(callback: CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка показа меню привилегий: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "buy_ads")
+async def show_ads_info(callback: CallbackQuery):
+    """Показывает информацию о рекламе и перенаправляет на создание тикета"""
+    try:
+        await callback.message.edit_text(
+            "<b>📢 Реклама в канале:</b>\n\n"
+            "• Закрепленный пост - 500 руб/день\n"
+            "• Рекламный пост - 300 руб\n"
+            "• Упоминание в посте - 150 руб\n\n"
+            "Для заказа рекламы создайте тикет в разделе 'Другое'",
+            reply_markup=help_menu(),
+            parse_mode="HTML"
+        )
+    except Exception:
+        await callback.answer()
 
 
 @router.callback_query(F.data.startswith("buy_"))
@@ -121,7 +129,7 @@ async def create_privilege_ticket(callback: CallbackQuery):
             reply_markup=main_menu(callback.from_user.id, config.ADMIN_IDS)
         )
 
-        logging.info(f"Создан тикет на покупку привилегии: TicketID={ticket.id}, Privilege={privilege_type}")
+        logging.info(f"Тикет на покупку привилегии создан: #{ticket.id}, Привилегия={privilege_type}, UserID={callback.from_user.id}")
 
     except Exception as e:
         logging.error(f"Ошибка создания тикета на покупку: {e}")
@@ -142,18 +150,6 @@ async def show_faq(callback: CallbackQuery):
         await callback.answer()
 
 
-@router.callback_query(F.data == "buy_ads")
-async def show_ads_info(callback: CallbackQuery):
-    try:
-        text = "<b>📢 Реклама в канале:</b>\n\n"
-        text += "• Закрепленный пост - 500 руб/день\n"
-        text += "• Рекламный пост - 300 руб\n"
-        text += "• Упоминание в посте - 150 руб\n\n"
-        text += "Для заказа рекламы создайте тикет в разделе 'Другое'"
-
-        await callback.message.edit_text(text, reply_markup=help_menu(), parse_mode="HTML")
-    except Exception:
-        await callback.answer()
 
 
 @router.callback_query(F.data == "other")
@@ -181,11 +177,13 @@ async def create_ticket_handler(callback: CallbackQuery, state: FSMContext):
         theme = theme_map.get(callback.data)
         if theme:
             await state.update_data(ticket_theme=theme)
-            await callback.message.answer(
+            instruction_msg = await callback.message.answer(
                 f"📝 Опишите ваш вопрос по теме '{theme}':\n\n"
                 "Опишите подробно вашу проблему или вопрос, и администратор скоро ответит.",
                 reply_markup=cancel_keyboard()
             )
+            # Сохраняем message_id инструкции в state для последующего удаления
+            await state.update_data(instruction_message_id=instruction_msg.message_id)
             await state.set_state(TicketStates.waiting_for_message)
     except Exception as e:
         logging.error(f"Ошибка создания тикета: {e}")
@@ -198,11 +196,16 @@ async def process_ticket_message(message: Message, state: FSMContext):
         data = await state.get_data()
         theme = data.get('ticket_theme')
 
+        # Удаляем предыдущие сообщения формы
+        from message_cleaner import message_cleaner
+        data = await state.get_data()
+        instruction_message_id = data.get('instruction_message_id')
+        await message_cleaner.delete_form_messages(message.bot, message, instruction_message_id)
+
         ticket = await ticket_service.create_ticket(message.from_user.id, theme)
         await ticket_service.add_message_to_ticket(ticket.id, message.from_user.id, message.text)
 
-        # Важное логирование
-        logging.info(f"Создан тикет: TicketID={ticket.id}, UserID={message.from_user.id}")
+        logging.info(f"Тикет создан: #{ticket.id}, UserID={message.from_user.id}, Тема={theme}")
 
         for admin_id in config.ADMIN_IDS:
             try:
@@ -231,52 +234,25 @@ async def process_ticket_message(message: Message, state: FSMContext):
 @router.callback_query(F.data == "my_tickets")
 async def show_my_tickets(callback: CallbackQuery):
     try:
-        # Проверяем, является ли пользователь админом
-        is_admin = await admin_service.is_admin(callback.from_user.id)
-        
-        if is_admin:
-            # Для админов показываем все открытые тикеты (новые и в работе)
-            new_tickets = await ticket_service.get_tickets_by_status("new")
-            in_progress_tickets = await ticket_service.get_tickets_by_status("in_progress")
-            tickets = (new_tickets or []) + (in_progress_tickets or [])
-            
-            if not tickets:
-                await callback.message.edit_text(
-                    "📭 Открытых тикетов пока нет.\n\n"
-                    "Все тикеты обработаны или их пока нет.",
-                    reply_markup=help_menu()
-                )
-                return
+        tickets = await ticket_service.get_user_tickets(callback.from_user.id)
 
+        if not tickets:
             await callback.message.edit_text(
-                "📋 <b>Открытые тикеты:</b>\n\n"
-                "🆕 - Новый\n"
-                "🔄 - В работе\n\n"
-                f"Всего открытых: {len(tickets)}",
-                reply_markup=my_tickets_keyboard(tickets),
-                parse_mode="HTML"
+                "📭 У вас пока нет тикетов.\n\n"
+                "Создайте тикет через раздел Помощь/Услуги",
+                reply_markup=help_menu()
             )
-        else:
-            # Для обычных пользователей показываем только их тикеты
-            tickets = await ticket_service.get_user_tickets(callback.from_user.id)
+            return
 
-            if not tickets:
-                await callback.message.edit_text(
-                    "📭 У вас пока нет тикетов.\n\n"
-                    "Создайте тикет через раздел Помощь/Услуги",
-                    reply_markup=help_menu()
-                )
-                return
-
-            await callback.message.edit_text(
-                "📋 Ваши тикеты:\n\n"
-                "🆕 - Новый\n"
-                "🔄 - В работе\n"
-                "✅ - Закрыт",
-                reply_markup=my_tickets_keyboard(tickets)
-            )
+        await callback.message.edit_text(
+            "📋 Ваши тикеты:\n\n"
+            "🆕 - Новый\n"
+            "🔄 - В работе\n"
+            "✅ - Закрыт",
+            reply_markup=my_tickets_keyboard(tickets)
+        )
     except Exception as e:
-        logging.error(f"Ошибка показа тикетов: {e}", exc_info=True)
+        logging.error(f"Ошибка показа тикетов: {e}")
         await callback.answer("❌ Ошибка загрузки тикетов", show_alert=True)
 
 
@@ -323,7 +299,7 @@ async def user_close_ticket(callback: CallbackQuery):
 
         if success:
             await callback.answer("✅ Тикет удален")
-            logging.info(f"Тикет удален пользователем: TicketID={ticket_id}, UserID={callback.from_user.id}")
+            logging.info(f"Тикет удален пользователем: #{ticket_id}, UserID={callback.from_user.id}")
             await show_my_tickets(callback)
         else:
             await callback.answer("❌ Ошибка удаления тикета", show_alert=True)
@@ -429,7 +405,13 @@ async def process_user_chat_message(message: Message, state: FSMContext):
         admin_id = data.get('active_chat_admin_id')
 
         if not ticket_id or not admin_id:
-            await message.answer("❌ Ошибка: чат не найден")
+            from message_cleaner import message_cleaner
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Ошибка: чат не найден",
+                delete_after=5
+            )
             await state.clear()
             return
 
@@ -449,15 +431,34 @@ async def process_user_chat_message(message: Message, state: FSMContext):
                 is_admin=False
             )
 
-            await message.answer("✅ Сообщение отправлено")
+            # Отправляем временное сообщение, которое удалится через 3 секунды
+            from message_cleaner import message_cleaner
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "✅ Сообщение отправлено",
+                delete_after=3
+            )
 
         except Exception as e:
             logging.error(f"Не удалось отправить сообщение админу: {e}")
-            await message.answer("❌ Не удалось отправить сообщение. Администратор, возможно, недоступен.")
+            from message_cleaner import message_cleaner
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Не удалось отправить сообщение. Администратор, возможно, недоступен.",
+                delete_after=5
+            )
 
     except Exception as e:
         logging.error(f"Ошибка обработки сообщения пользователя: {e}")
-        await message.answer("❌ Ошибка отправки сообщения")
+        from message_cleaner import message_cleaner
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            "❌ Ошибка отправки сообщения",
+            delete_after=5
+        )
 
 
 @router.callback_query(F.data.startswith("end_chat_"))

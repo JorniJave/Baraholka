@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 import logging
@@ -61,37 +61,28 @@ def get_priority_icon(priority):
 
 @router.callback_query(F.data == "admin_tickets")
 async def admin_tickets(callback: CallbackQuery):
-    """Главное меню управления тикетами - показывает статистику и кнопки выбора"""
     try:
         if not await admin_service.is_admin(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен")
             return
 
-        # Получаем статистику по тикетам
-        new_tickets = await ticket_service.get_tickets_by_status("new")
-        in_progress_tickets = await ticket_service.get_tickets_by_status("in_progress")
-        
-        new_count = len(new_tickets) if new_tickets else 0
-        in_progress_count = len(in_progress_tickets) if in_progress_tickets else 0
+        # ✅ ПОЛУЧАЕМ ТИКЕТЫ ОТСОРТИРОВАННЫЕ ПО ПРИОРИТЕТУ
+        tickets = await get_tickets_by_priority("new")
 
-        text = "🎫 <b>Управление тикетами</b>\n\n"
-        text += f"🆕 <b>Новые тикеты:</b> {new_count}\n"
-        text += f"🔄 <b>В работе:</b> {in_progress_count}\n\n"
-        text += "💡 Выберите раздел для просмотра тикетов:"
+        if not tickets:
+            text = "🎫 Нет новых тикетов"
+            keyboard = ticket_priority_keyboard()
+        else:
+            text = f"🎫 Новые тикеты ({len(tickets)}):\n\n"
+            text += "🔴 <b>Высокий приоритет</b> - покупки, реклама\n"
+            text += "🟡 <b>Средний приоритет</b> - другие вопросы\n"
+            text += "🟢 <b>Низкий приоритет</b> - вопросы о боте\n"
 
-        # Используем клавиатуру со статусами
-        keyboard = ticket_status_keyboard()
+            keyboard = admin_tickets_list_keyboard(tickets)
 
-        # Проверяем, изменился ли текст перед редактированием
-        try:
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        except Exception as edit_error:
-            if "message is not modified" in str(edit_error).lower():
-                await callback.answer("✅ Меню тикетов")
-            else:
-                raise
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except Exception as e:
-        logging.error(f"Ошибка админ тикетов: {e}", exc_info=True)
+        logging.error(f"Ошибка админ тикетов: {e}")
         await callback.answer("❌ Ошибка загрузки тикетов", show_alert=True)
 
 
@@ -119,59 +110,32 @@ async def admin_tickets_by_status(callback: CallbackQuery):
             "new": "🆕 Новые",
             "in_progress": "🔄 В работе"
         }
-        
-        status_emoji = {
-            "new": "🆕",
-            "in_progress": "🔄"
-        }
 
         if not tickets:
-            text = f"{status_emoji[status]} <b>Нет тикетов со статусом '{status_text[status]}'</b>\n\n"
-            text += "💡 Все тикеты этого статуса обработаны или их пока нет."
-            keyboard = ticket_status_keyboard()
+            text = f"🎫 Нет тикетов со статусом '{status_text[status]}'"
+            keyboard = ticket_priority_keyboard()
         else:
-            text = f"{status_emoji[status]} <b>Тикеты: {status_text[status]} ({len(tickets)})</b>\n\n"
-            text += "🔴 <b>Высокий приоритет</b> - покупки, реклама\n"
-            text += "🟡 <b>Средний приоритет</b> - другие вопросы\n"
-            text += "🟢 <b>Низкий приоритет</b> - вопросы о боте\n\n"
-            text += "💡 Тикеты отсортированы по приоритету:"
+            text = f"🎫 Тикеты со статусом '{status_text[status]}' ({len(tickets)}):\n\n"
+            text += "🔴 <b>Высокий приоритет</b>\n"
+            text += "🟡 <b>Средний приоритет</b>\n"
+            text += "🟢 <b>Низкий приоритет</b>\n"
 
             keyboard = admin_tickets_list_keyboard(tickets)
-            # Добавляем кнопку "Назад" к списку тикетов
-            keyboard.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад к меню тикетов", callback_data="admin_tickets")])
 
-        # Проверяем, изменился ли текст перед редактированием
-        try:
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        except Exception as edit_error:
-            if "message is not modified" in str(edit_error).lower():
-                await callback.answer("✅ Список тикетов")
-            else:
-                raise
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except Exception as e:
-        logging.error(f"Ошибка загрузки тикетов по статусу: {e}", exc_info=True)
+        logging.error(f"Ошибка загрузки тикетов по статусу: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin_view_ticket_"))
-async def admin_view_ticket(callback: CallbackQuery, ticket_id: int = None):
-    """
-    Показывает тикет админу.
-    ticket_id можно передать напрямую для обновления после взятия в работу.
-    """
+async def admin_view_ticket(callback: CallbackQuery):
     try:
         if not await admin_service.is_admin(callback.from_user.id):
             await callback.answer("❌ Доступ запрещен")
             return
 
-        # Безопасное получение ticket_id
-        if ticket_id is None:
-            parts = callback.data.split("_")
-            if len(parts) < 4:
-                await callback.answer("❌ Неверный формат данных", show_alert=True)
-                return
-            ticket_id = int(parts[3])
-        
+        ticket_id = int(callback.data.split("_")[3])
         ticket = await ticket_service.get_ticket_by_id(ticket_id)
 
         if not ticket:
@@ -182,7 +146,7 @@ async def admin_view_ticket(callback: CallbackQuery, ticket_id: int = None):
 
         # Безопасное получение username
         user_profile = await user_service.get_user_profile(ticket.user_id)
-        username = user_profile.get('username', 'неизвестно') if user_profile else "неизвестно"
+        username = user_profile['username'] if user_profile else "неизвестно"
 
         # ✅ ОПРЕДЕЛЯЕМ ПРИОРИТЕТ ТИКЕТА
         priority = get_ticket_priority(ticket.theme)
@@ -193,47 +157,25 @@ async def admin_view_ticket(callback: CallbackQuery, ticket_id: int = None):
             "low": "🟢 НИЗКИЙ"
         }.get(priority, "⚪ НЕОПРЕДЕЛЕН")
 
-        # Статус на русском
-        status_text = {
-            "new": "🆕 Новый",
-            "in_progress": "🔄 В работе",
-            "closed": "✅ Закрыт"
-        }.get(ticket.status, ticket.status)
-
         text = f"🎫 Тикет #{ticket.id}\n"
         text += f"📌 Приоритет: {priority_icon} {priority_text}\n"
-        text += f"📋 Тема: {ticket.theme}\n"
-        text += f"📊 Статус: {status_text}\n"
-        text += f"👤 Пользователь: @{username} (ID: {ticket.user_id})\n"
-        text += f"📅 Создан: {ticket.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
-        
-        if messages:
-            text += "💬 История сообщений:\n\n"
-            for msg in messages:
-                sender = "👤 Пользователь" if not msg.is_admin else "🛠 Администратор"
-                text += f"{sender} ({msg.created_at.strftime('%H:%M')}):\n{msg.message_text}\n\n"
-        else:
-            text += "💬 История сообщений пуста\n\n"
+        text += f"Тема: {ticket.theme}\n"
+        text += f"Статус: {ticket.status}\n"
+        text += f"Пользователь: @{username} (ID: {ticket.user_id})\n"
+        text += f"Создан: {ticket.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        text += "💬 История сообщений:\n\n"
+
+        for msg in messages:
+            sender = "👤 Пользователь" if not msg.is_admin else "🛠 Вы"
+            text += f"{sender} ({msg.created_at.strftime('%H:%M')}):\n{msg.message_text}\n\n"
 
         # Безопасное обрезание текста
         if len(text) > 4000:
             text = text[:3997] + "..."
 
-        # Проверяем, изменился ли текст перед редактированием
-        try:
-            # Передаем статус тикета для правильного отображения кнопок
-            await callback.message.edit_text(
-                text, 
-                reply_markup=ticket_actions_keyboard(ticket_id, is_admin=True, ticket_status=ticket.status)
-            )
-        except Exception as edit_error:
-            # Если сообщение не изменилось, просто обновляем клавиатуру
-            if "message is not modified" in str(edit_error).lower():
-                await callback.answer("✅ Тикет обновлен")
-            else:
-                raise
+        await callback.message.edit_text(text, reply_markup=ticket_actions_keyboard(ticket_id, is_admin=True))
     except Exception as e:
-        logging.error(f"Ошибка админ просмотра тикета: {e}", exc_info=True)
+        logging.error(f"Ошибка админ просмотра тикета: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
@@ -244,33 +186,19 @@ async def admin_take_ticket(callback: CallbackQuery):
             await callback.answer("❌ Доступ запрещен")
             return
 
-        # Безопасное получение ticket_id
-        parts = callback.data.split("_")
-        if len(parts) < 3:
-            await callback.answer("❌ Неверный формат данных", show_alert=True)
-            return
-        
-        ticket_id = int(parts[2])
-        
-        # Проверяем, существует ли тикет
-        ticket = await ticket_service.get_ticket_by_id(ticket_id)
-        if not ticket:
-            await callback.answer("❌ Тикет не найден", show_alert=True)
-            return
-        
-        # Обновляем статус тикета (НЕ закрываем, а берем в работу)
+        ticket_id = int(callback.data.split("_")[2])
         success = await ticket_service.update_ticket_status(ticket_id, "in_progress", callback.from_user.id)
 
         if success:
             await callback.answer("✅ Тикет взят в работу")
-            logging.info(f"Тикет взят в работу: TicketID={ticket_id}, AdminID={callback.from_user.id}")
+            logging.info(f"Тикет взят в работу: #{ticket_id}, AdminID={callback.from_user.id}")
 
-            # Обновляем сообщение с тикетом, передавая ticket_id напрямую
-            await admin_view_ticket(callback, ticket_id=ticket_id)
+            # Обновляем сообщение с тикетом
+            await admin_view_ticket(callback)
         else:
-            await callback.answer("❌ Ошибка обновления статуса", show_alert=True)
+            await callback.answer("❌ Ошибка", show_alert=True)
     except Exception as e:
-        logging.error(f"Ошибка взятия тикета: {e}", exc_info=True)
+        logging.error(f"Ошибка взятия тикета: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
 
@@ -305,7 +233,7 @@ async def admin_close_ticket(callback: CallbackQuery):
                 logging.error(f"Не удалось уведомить пользователя {ticket.user_id}: {e}")
 
             await callback.answer("✅ Тикет удален")
-            logging.info(f"Тикет удален админом: TicketID={ticket_id}, AdminID={callback.from_user.id}")
+            logging.info(f"Тикет удален админом: #{ticket_id}, AdminID={callback.from_user.id}")
 
             # Возвращаемся к списку тикетов
             await admin_tickets(callback)
@@ -430,15 +358,34 @@ async def process_admin_chat_message(message: Message, state: FSMContext):
                 is_admin=True
             )
 
-            await message.answer("✅ Сообщение отправлено")
+            # Отправляем временное сообщение, которое удалится через 3 секунды
+            from message_cleaner import message_cleaner
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "✅ Сообщение отправлено",
+                delete_after=3
+            )
 
         except Exception as e:
             logging.error(f"Не удалось отправить сообщение пользователю: {e}")
-            await message.answer("❌ Не удалось отправить сообщение. Пользователь, возможно, заблокировал бота.")
+            from message_cleaner import message_cleaner
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Не удалось отправить сообщение. Пользователь, возможно, заблокировал бота.",
+                delete_after=5
+            )
 
     except Exception as e:
         logging.error(f"Ошибка обработки сообщения админа: {e}")
-        await message.answer("❌ Ошибка отправки сообщения")
+        from message_cleaner import message_cleaner
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            "❌ Ошибка отправки сообщения",
+            delete_after=5
+        )
 
 
 @router.callback_query(F.data.startswith("end_chat_"))

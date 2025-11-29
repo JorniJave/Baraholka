@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -84,6 +84,11 @@ async def search_by_id_start(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserManagementStates.waiting_user_id)
         text = "🔍 <b>Поиск по ID</b>\n\nВведите ID пользователя:"
         await callback.message.edit_text(text, parse_mode="HTML")
+        # Сохраняем message_id инструкции в state для последующего удаления
+        # edit_text редактирует существующее сообщение, поэтому message_id остается тем же
+        instruction_message_id = callback.message.message_id
+        await state.update_data(instruction_message_id=instruction_message_id)
+        logging.debug(f"Сохранен message_id инструкции: {instruction_message_id}")
 
     except Exception as e:
         logging.error(f"Ошибка поиска по ID: {e}")
@@ -101,6 +106,8 @@ async def search_by_username_start(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserManagementStates.waiting_username)
         text = "🔍 <b>Поиск по username</b>\n\nВведите username пользователя (без @):"
         await callback.message.edit_text(text, parse_mode="HTML")
+        # Сохраняем message_id инструкции в state для последующего удаления
+        await state.update_data(instruction_message_id=callback.message.message_id)
 
     except Exception as e:
         logging.error(f"Ошибка поиска по username: {e}")
@@ -116,34 +123,35 @@ async def process_user_id_search(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        if not message.text or not message.text.strip().isdigit():
-            await message.answer("❌ Введите корректный ID (только цифры):")
+        if not message.text.isdigit():
+            from message_cleaner import message_cleaner
+            await message_cleaner.send_temp_message(
+                message.bot,
+                message.from_user.id,
+                "❌ Введите корректный ID (только цифры):",
+                delete_after=5
+            )
             return
 
-        user_id = int(message.text.strip())
-        logging.info(f"🔍 Поиск пользователя по ID: {user_id} (админ: {message.from_user.id})")
-        
-        # Проверяем существование пользователя перед показом
-        user = await user_service.get_user_by_id(user_id)
-        if not user:
-            logging.warning(f"❌ Пользователь с ID {user_id} не найден в базе данных")
-            await message.answer(
-                f"❌ Пользователь с ID <code>{user_id}</code> не найден в базе данных.\n\n"
-                f"💡 Убедитесь, что пользователь использовал бота хотя бы раз (/start).",
-                parse_mode="HTML"
-            )
-            await state.clear()
-            return
-        
+        # Удаляем предыдущие сообщения формы
+        from message_cleaner import message_cleaner
+        data = await state.get_data()
+        instruction_message_id = data.get('instruction_message_id')
+        await message_cleaner.delete_form_messages(message.bot, message, instruction_message_id)
+
+        user_id = int(message.text)
         await find_and_show_user(message, user_id=user_id)
         await state.clear()
 
-    except ValueError as e:
-        logging.error(f"Ошибка парсинга ID: {e}")
-        await message.answer("❌ Введите корректный ID (только цифры):")
     except Exception as e:
-        logging.error(f"Ошибка обработки поиска по ID: {e}", exc_info=True)
-        await message.answer("❌ Ошибка поиска. Попробуйте еще раз.")
+        logging.error(f"Ошибка обработки поиска по ID: {e}")
+        from message_cleaner import message_cleaner
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            "❌ Ошибка поиска",
+            delete_after=5
+        )
         await state.clear()
 
 
@@ -156,98 +164,41 @@ async def process_username_search(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        if not message.text or not message.text.strip():
-            await message.answer("❌ Введите username пользователя:")
-            return
+        username = message.text.strip().lstrip('@')
 
-        username = message.text.strip().lstrip('@').lower()
-        logging.info(f"🔍 Поиск пользователя по username: {username} (админ: {message.from_user.id})")
+        # Удаляем предыдущие сообщения формы
+        from message_cleaner import message_cleaner
+        data = await state.get_data()
+        instruction_message_id = data.get('instruction_message_id')
+        await message_cleaner.delete_form_messages(message.bot, message, instruction_message_id)
 
         async with AsyncSessionLocal() as session:
-            # Точный поиск
-            stmt = select(User).where(User.username.ilike(username))
+            stmt = select(User).where(User.username == username)
             result = await session.execute(stmt)
             user = result.scalar_one_or_none()
 
             if user:
                 await find_and_show_user(message, user=user)
             else:
-                # Частичный поиск (если точный не дал результатов)
-                stmt = select(User).where(User.username.ilike(f"%{username}%"))
-                result = await session.execute(stmt)
-                users = result.scalars().all()
-                
-                if users:
-                    if len(users) == 1:
-                        # Если найден один пользователь - показываем его
-                        await find_and_show_user(message, user=users[0])
-                    else:
-                        # Если найдено несколько - показываем список
-                        text = f"🔍 Найдено пользователей: {len(users)}\n\n"
-                        text += "💡 Выберите пользователя из списка:\n\n"
-                        
-                        keyboard = []
-                        for u in users[:10]:  # Ограничиваем 10 результатами
-                            text += f"👤 @{u.username or 'нет'} (ID: {u.id})\n"
-                            keyboard.append([InlineKeyboardButton(
-                                text=f"@{u.username or 'нет'} (ID: {u.id})",
-                                callback_data=f"select_user_{u.id}"
-                            )])
-                        
-                        if len(users) > 10:
-                            text += f"\n... и еще {len(users) - 10} пользователей"
-                        
-                        keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="find_user_menu")])
-                        
-                        await message.answer(
-                            text,
-                            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
-                            parse_mode="HTML"
-                        )
-                else:
-                    logging.warning(f"❌ Пользователь с username '{username}' не найден в базе данных")
-                    await message.answer(
-                        f"❌ Пользователь с username <b>@{username}</b> не найден в базе данных.\n\n"
-                        f"💡 Возможные причины:\n"
-                        f"• Пользователь еще не использовал бота\n"
-                        f"• Username указан неверно\n"
-                        f"• Пользователь изменил username\n\n"
-                        f"💡 Попробуйте поиск по ID пользователя.",
-                        parse_mode="HTML"
-                    )
+                await message_cleaner.send_temp_message(
+                    message.bot,
+                    message.from_user.id,
+                    f"❌ Пользователь с username @{username} не найден",
+                    delete_after=5
+                )
 
         await state.clear()
 
     except Exception as e:
-        logging.error(f"Ошибка обработки поиска по username: {e}", exc_info=True)
-        await message.answer("❌ Ошибка поиска. Попробуйте еще раз.")
+        logging.error(f"Ошибка обработки поиска по username: {e}")
+        from message_cleaner import message_cleaner
+        await message_cleaner.send_temp_message(
+            message.bot,
+            message.from_user.id,
+            "❌ Ошибка поиска",
+            delete_after=5
+        )
         await state.clear()
-
-
-@router.callback_query(F.data.startswith("select_user_"))
-async def select_user_from_list(callback: CallbackQuery):
-    """Выбор пользователя из списка результатов поиска"""
-    try:
-        if not await admin_service.is_admin(callback.from_user.id):
-            await callback.answer("❌ Доступ запрещен")
-            return
-        
-        user_id = int(callback.data.split("_")[2])
-        logging.info(f"🔍 Выбран пользователь из списка: {user_id} (админ: {callback.from_user.id})")
-        
-        user = await user_service.get_user_by_id(user_id)
-        if not user:
-            await callback.answer("❌ Пользователь не найден", show_alert=True)
-            return
-        
-        # Используем find_and_show_user для отображения
-        await callback.message.delete()  # Удаляем список
-        await find_and_show_user(callback.message, user=user)
-        await callback.answer()
-        
-    except Exception as e:
-        logging.error(f"Ошибка выбора пользователя из списка: {e}", exc_info=True)
-        await callback.answer("❌ Ошибка", show_alert=True)
 
 
 async def find_and_show_user(message: Message, user_id: int = None, user: User = None):
@@ -256,14 +207,9 @@ async def find_and_show_user(message: Message, user_id: int = None, user: User =
         async with AsyncSessionLocal() as session:
             if user_id and not user:
                 user = await session.get(User, user_id)
-                logging.info(f"🔍 Поиск пользователя по ID: {user_id}, найден: {user is not None}")
 
             if not user:
-                logging.warning(f"❌ Пользователь не найден: user_id={user_id}, user={user}")
-                await message.answer(
-                    "❌ Пользователь не найден в базе данных.\n\n"
-                    "💡 Убедитесь, что пользователь использовал бота хотя бы раз (/start)."
-                )
+                await message.answer("❌ Пользователь не найден")
                 return
 
             # ✅ СОХРАНЯЕМ ВЫБРАННОГО ПОЛЬЗОВАТЕЛЯ
@@ -271,75 +217,24 @@ async def find_and_show_user(message: Message, user_id: int = None, user: User =
 
             # Получаем статистику пользователя
             profile = await user_service.get_user_profile(user.id)
-            
-            # Проверяем, забанен ли пользователь (профиль может быть неполным)
-            is_banned = profile.get('banned', False) or user.banned
 
-            # Получаем дополнительную информацию
-            from database import Referral, Post
-            from sqlalchemy import select, func
-            
-            # Количество рефералов в базе
-            referrals_stmt = select(func.count(Referral.id)).where(Referral.referrer_id == user.id)
-            referrals_result = await session.execute(referrals_stmt)
-            actual_referrals = referrals_result.scalar()
-            
-            # Количество постов в базе
-            posts_stmt = select(func.count(Post.id)).where(Post.user_id == user.id)
-            posts_result = await session.execute(posts_stmt)
-            actual_posts = posts_result.scalar()
-            
-            # Информация о реферере
-            referrer_info = ""
-            if user.referrer_id:
-                referrer = await session.get(User, user.referrer_id)
-                if referrer:
-                    referrer_info = f"👤 Реферер: @{referrer.username or 'нет'} (ID: {referrer.id})\n"
-            
-            # Эмодзи для привилегии
-            privilege_emoji = {
-                "user": "👤",
-                "vip": "💎",
-                "premium": "⭐",
-                "god": "👑",
-                "ultra_seller": "🔥"
-            }
-            privilege_icon = privilege_emoji.get(user.privilege, "⭐")
-            
-            ban_status = "🚫 ЗАБЛОКИРОВАН" if is_banned else "✅ АКТИВЕН"
-            ban_icon = "🚫" if is_banned else "✅"
+            ban_status = "🚫 ЗАБЛОКИРОВАН" if user.banned else "✅ АКТИВЕН"
+            ban_icon = "🚫" if user.banned else "✅"
 
-            text = "━━━━━━━━━━━━━━━━━━━━\n"
-            text += f"👤 <b>Информация о пользователе</b>\n"
-            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            text += f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
-            text += f"📛 <b>Username:</b> @{user.username or 'нет'}\n"
-            text += f"{privilege_icon} <b>Привилегия:</b> {user.privilege.upper()}\n"
-            text += f"{ban_icon} <b>Статус:</b> {ban_status}\n\n"
-            
-            text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "<b>📊 Статистика:</b>\n"
-            text += f"📦 Постов: <b>{user.posts_count}</b> (в БД: {actual_posts})\n"
-            text += f"👥 Рефералов: <b>{user.referrals_count}</b> (в БД: {actual_referrals})\n"
-            
-            # Безопасное получение cooldown (может отсутствовать для забаненных)
-            cooldown = profile.get('cooldown', 0) if not is_banned else 0
-            text += f"⏰ Кулдаун: <b>{cooldown}</b> мин\n\n"
-            
-            if referrer_info:
-                text += "━━━━━━━━━━━━━━━━━━━━\n"
-                text += referrer_info + "\n"
-            
-            text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "<b>📅 Даты:</b>\n"
-            text += f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            text = f"👤 <b>Информация о пользователе</b>\n\n"
+            text += f"🆔 ID: <code>{user.id}</code>\n"
+            text += f"📛 Username: @{user.username or 'нет'}\n"
+            text += f"⭐ Статус: {user.privilege.upper()}\n"
+            text += f"📊 Постов: {user.posts_count}\n"
+            text += f"👥 Рефералов: {user.referrals_count}\n"
+            text += f"⏰ Кулдаун: {profile['cooldown']} мин\n"
+            text += f"{ban_icon} Статус: {ban_status}\n"
+            text += f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+
             if user.last_post_time:
-                text += f"Последний пост: {user.last_post_time.strftime('%d.%m.%Y %H:%M')}\n"
-            else:
-                text += "Последний пост: никогда\n"
-            
-            text += "\n💡 <i>Пользователь выбран для управления</i>"
+                text += f"📝 Последний пост: {user.last_post_time.strftime('%d.%m.%Y %H:%M')}\n"
+
+            text += f"\n💡 <i>Пользователь выбран для управления</i>"
 
             await message.answer(text, reply_markup=user_actions_keyboard(user.id), parse_mode="HTML")
 
@@ -386,21 +281,7 @@ async def ban_user(callback: CallbackQuery):
         success = await user_service.ban_user(user_id)
 
         if success:
-            # Отправляем уведомление забаненному пользователю
-            try:
-                from config import config
-                from aiogram import Bot
-                bot = Bot(token=config.BOT_TOKEN)
-                await bot.send_message(
-                    user_id,
-                    "🚫 Вы были заблокированы администратором и не можете использовать бота."
-                )
-                await bot.session.close()
-            except Exception as e:
-                logging.error(f"Не удалось отправить уведомление о бане пользователю {user_id}: {e}")
-            
             await callback.answer(f"✅ Пользователь {user_id} заблокирован")
-            logging.info(f"Пользователь {user_id} заблокирован админом {callback.from_user.id}")
             # ✅ ОБНОВЛЯЕМ СООБЩЕНИЕ БЕЗ ДУБЛИРОВАНИЯ
             await update_user_info(callback, user_id)
         else:
@@ -580,81 +461,30 @@ async def update_user_info(callback: CallbackQuery, user_id: int):
                 return
 
             profile = await user_service.get_user_profile(user.id)
-            
-            # Проверяем, забанен ли пользователь (профиль может быть неполным)
-            is_banned = profile.get('banned', False) or user.banned
 
-            # Получаем дополнительную информацию
-            from database import Referral, Post
-            from sqlalchemy import select, func
-            
-            # Количество рефералов в базе
-            referrals_stmt = select(func.count(Referral.id)).where(Referral.referrer_id == user.id)
-            referrals_result = await session.execute(referrals_stmt)
-            actual_referrals = referrals_result.scalar()
-            
-            # Количество постов в базе
-            posts_stmt = select(func.count(Post.id)).where(Post.user_id == user.id)
-            posts_result = await session.execute(posts_stmt)
-            actual_posts = posts_result.scalar()
-            
-            # Информация о реферере
-            referrer_info = ""
-            if user.referrer_id:
-                referrer = await session.get(User, user.referrer_id)
-                if referrer:
-                    referrer_info = f"👤 Реферер: @{referrer.username or 'нет'} (ID: {referrer.id})\n"
-            
-            # Эмодзи для привилегии
-            privilege_emoji = {
-                "user": "👤",
-                "vip": "💎",
-                "premium": "⭐",
-                "god": "👑",
-                "ultra_seller": "🔥"
-            }
-            privilege_icon = privilege_emoji.get(user.privilege, "⭐")
-            
-            ban_status = "🚫 ЗАБЛОКИРОВАН" if is_banned else "✅ АКТИВЕН"
-            ban_icon = "🚫" if is_banned else "✅"
+            ban_status = "🚫 ЗАБЛОКИРОВАН" if user.banned else "✅ АКТИВЕН"
+            ban_icon = "🚫" if user.banned else "✅"
 
-            text = "━━━━━━━━━━━━━━━━━━━━\n"
-            text += f"👤 <b>Информация о пользователе</b>\n"
-            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            text += f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
-            text += f"📛 <b>Username:</b> @{user.username or 'нет'}\n"
-            text += f"{privilege_icon} <b>Привилегия:</b> {user.privilege.upper()}\n"
-            text += f"{ban_icon} <b>Статус:</b> {ban_status}\n\n"
-            
-            text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "<b>📊 Статистика:</b>\n"
-            text += f"📦 Постов: <b>{user.posts_count}</b> (в БД: {actual_posts})\n"
-            text += f"👥 Рефералов: <b>{user.referrals_count}</b> (в БД: {actual_referrals})\n"
-            
-            # Безопасное получение cooldown (может отсутствовать для забаненных)
-            cooldown = profile.get('cooldown', 0) if not is_banned else 0
-            text += f"⏰ Кулдаун: <b>{cooldown}</b> мин\n\n"
-            
-            if referrer_info:
-                text += "━━━━━━━━━━━━━━━━━━━━\n"
-                text += referrer_info + "\n"
-            
-            text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "<b>📅 Даты:</b>\n"
-            text += f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            text = f"👤 <b>Информация о пользователе</b>\n\n"
+            text += f"🆔 ID: <code>{user.id}</code>\n"
+            text += f"📛 Username: @{user.username or 'нет'}\n"
+            text += f"⭐ Статус: {user.privilege.upper()}\n"
+            text += f"📊 Постов: {user.posts_count}\n"
+            text += f"👥 Рефералов: {user.referrals_count}\n"
+            text += f"⏰ Кулдаун: {profile['cooldown']} мин\n"
+            text += f"{ban_icon} Статус: {ban_status}\n"
+            text += f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+
             if user.last_post_time:
-                text += f"Последний пост: {user.last_post_time.strftime('%d.%m.%Y %H:%M')}\n"
-            else:
-                text += "Последний пост: никогда\n"
-            
-            text += "\n💡 <i>Пользователь выбран для управления</i>"
+                text += f"📝 Последний пост: {user.last_post_time.strftime('%d.%m.%Y %H:%M')}\n"
+
+            text += f"\n💡 <i>Пользователь выбран для управления</i>"
 
             # ✅ РЕДАКТИРУЕМ СУЩЕСТВУЮЩЕЕ СООБЩЕНИЕ ВМЕСТО ОТПРАВКИ НОВОГО
             await callback.message.edit_text(text, reply_markup=user_actions_keyboard(user.id), parse_mode="HTML")
 
     except Exception as e:
-        logging.error(f"Ошибка обновления информации о пользователе: {e}", exc_info=True)
+        logging.error(f"Ошибка обновления информации о пользователе: {e}")
         await callback.answer("❌ Ошибка обновления", show_alert=True)
 
 

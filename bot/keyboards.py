@@ -23,7 +23,6 @@ def help_menu():
         inline_keyboard=[
             [InlineKeyboardButton(text="💎 Купить привилегию", callback_data="buy_privilege")],
             [InlineKeyboardButton(text="❓ Вопросы о боте", callback_data="faq")],
-            [InlineKeyboardButton(text="📢 Купить рекламу", callback_data="buy_ads")],
             [InlineKeyboardButton(text="📞 Другое", callback_data="other")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="main")]
         ]
@@ -139,19 +138,14 @@ def admin_tickets_list_keyboard(tickets):
     return tickets_list_keyboard(tickets, is_admin=True, back_callback="admin_main")
 
 
-def ticket_actions_keyboard(ticket_id, is_admin=False, ticket_status="new"):
-    """
-    Клавиатура действий с тикетом.
-    ticket_status: "new", "in_progress", "closed" - для определения доступных действий
-    """
+def ticket_actions_keyboard(ticket_id, is_admin=False):
     keyboard = []
     if is_admin:
-        # Показываем "Взять в работу" только для новых тикетов
-        if ticket_status == "new":
-            keyboard.append([InlineKeyboardButton(text="🔄 Взять в работу", callback_data=f"admin_take_{ticket_id}")])
-        
-        keyboard.append([InlineKeyboardButton(text="💬 Ответить в чат", callback_data=f"reply_ticket_{ticket_id}")])
-        keyboard.append([InlineKeyboardButton(text="✅ Закрыть тикет", callback_data=f"admin_close_{ticket_id}")])
+        keyboard.extend([
+            [InlineKeyboardButton(text="🔄 Взять в работу", callback_data=f"admin_take_{ticket_id}")],
+            [InlineKeyboardButton(text="💬 Ответить в чат", callback_data=f"reply_ticket_{ticket_id}")],
+            [InlineKeyboardButton(text="✅ Закрыть тикет", callback_data=f"admin_close_{ticket_id}")],
+        ])
     else:
         keyboard.append([InlineKeyboardButton(text="✅ Закрыть тикет", callback_data=f"close_ticket_{ticket_id}")])
 

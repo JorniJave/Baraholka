@@ -149,6 +149,11 @@ class Config:
         "god": {"cooldown": 20, "price": 500, "label": "GOD"},
         "ultra_seller": {"cooldown": 10, "price": 1500, "label": "ULTRA SELLER"}
     }
+    
+    # Настройки автоочистки сообщений
+    # AUTO_DELETE_DELAY: автоматическое удаление всех сообщений через N секунд (0 = отключено)
+    # По умолчанию отключено, временные уведомления удаляются через 3-5 секунд
+    AUTO_DELETE_DELAY = int(os.getenv("AUTO_DELETE_DELAY", "0"))  # 0 = отключено
 
 
 config = Config()

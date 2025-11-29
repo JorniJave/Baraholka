@@ -21,21 +21,16 @@ admin_service = AdminService()
 async def cmd_start(message: Message, command: CommandObject = None):
     """Обработчик команды /start"""
     try:
-        logging.info(f"✅ Получена команда /start от пользователя {message.from_user.id} (@{message.from_user.username})")
-        
         # ✅ ПРОВЕРКА БАНА ПЕРЕД ОБРАБОТКОЙ КОМАНДЫ
         if message.from_user.id not in config.ADMIN_IDS:
             is_banned = await user_service.is_user_banned(message.from_user.id)
             if is_banned:
-                logging.info(f"🚫 Забаненный пользователь {message.from_user.id} попытался использовать /start")
+                logging.warning(f"Забаненный пользователь {message.from_user.id} попытался использовать /start")
                 await message.answer("🚫 Вы заблокированы и не можете использовать бота.")
                 return
         
         # Получаем аргументы из команды
         args = command.args if command else None
-        
-        if args:
-            logging.info(f"📝 Аргументы команды: {args}")
 
         user, referrer_id, is_new = await simple_referral.handle_start_command(
             user_id=message.from_user.id,
@@ -44,8 +39,6 @@ async def cmd_start(message: Message, command: CommandObject = None):
             args=args,
             bot=message.bot
         )
-        
-        logging.info(f"👤 Пользователь обработан: is_new={is_new}, referrer_id={referrer_id}")
 
         # Логируем только важное
         if is_new:
@@ -55,7 +48,7 @@ async def cmd_start(message: Message, command: CommandObject = None):
                     f"пользователем с ID <b>{referrer_id}</b>.\n\n"
                     f"🏪 Добро пожаловать на барахолку! Используйте меню ниже для навигации:"
                 )
-                logging.info(f"✨ Новый пользователь: ID={message.from_user.id}, Referrer={referrer_id}")
+                logging.info(f"Новый пользователь: ID={message.from_user.id}, Referrer={referrer_id}")
             else:
                 welcome_text = (
                     f"{message.from_user.full_name}, вы зарегистрированы в боте.\n\n"
@@ -67,15 +60,18 @@ async def cmd_start(message: Message, command: CommandObject = None):
                 f"🏪 Добро пожаловать на барахолку! Используйте меню ниже для навигации:"
             )
 
-        logging.info(f"📤 Отправляю приветственное сообщение пользователю {message.from_user.id}")
-        
         await message.answer(
             welcome_text,
             reply_markup=main_menu(message.from_user.id, config.ADMIN_IDS),
             parse_mode="HTML"
         )
         
-        logging.info(f"✅ Сообщение отправлено пользователю {message.from_user.id}")
+        # Удаляем сообщение с командой /start
+        try:
+            from message_cleaner import message_cleaner
+            await message_cleaner.delete_command_message(message.bot, message)
+        except Exception as e:
+            logging.debug(f"Ошибка удаления команды /start: {e}")
 
     except Exception as e:
         logging.error(f"❌ Ошибка в старт команде для {message.from_user.id}: {e}", exc_info=True)
@@ -84,8 +80,17 @@ async def cmd_start(message: Message, command: CommandObject = None):
                 "🏪 Добро пожаловать! Используйте меню для навигации:",
                 reply_markup=main_menu(message.from_user.id, config.ADMIN_IDS)
             )
+            # Удаляем сообщение с командой /start даже при ошибке
+            from message_cleaner import message_cleaner
+            await message_cleaner.delete_command_message(message.bot, message)
         except Exception as e2:
             logging.error(f"❌ Критическая ошибка отправки сообщения: {e2}")
+            # Пытаемся удалить команду даже при критической ошибке
+            try:
+                from message_cleaner import message_cleaner
+                await message_cleaner.delete_command_message(message.bot, message)
+            except:
+                pass
 
         # Логируем только важное
         if is_new:
@@ -133,6 +138,10 @@ async def cmd_myid(message: Message):
     response += f"👑 Статус админа: {'✅ Да' if is_admin else '❌ Нет'}"
 
     await message.answer(response, parse_mode="HTML")
+    
+    # Удаляем сообщение с командой
+    from message_cleaner import message_cleaner
+    await message_cleaner.delete_command_message(message.bot, message)
 
 
 @router.message(Command("ref"))
@@ -157,6 +166,10 @@ async def cmd_ref(message: Message):
     )
 
     await message.answer(text, parse_mode="HTML")
+    
+    # Удаляем сообщение с командой
+    from message_cleaner import message_cleaner
+    await message_cleaner.delete_command_message(message.bot, message)
 
 
 @router.message(Command("ref_top"))
@@ -166,6 +179,9 @@ async def cmd_ref_top(message: Message):
 
     if not leaderboard:
         await message.answer("🏆 Пока нет активных рефереров")
+        # Удаляем сообщение с командой
+        from message_cleaner import message_cleaner
+        await message_cleaner.delete_command_message(message.bot, message)
         return
 
     text = "<b>🏆 Топ рефереров:</b>\n\n"
@@ -174,6 +190,10 @@ async def cmd_ref_top(message: Message):
         text += f"{medal} @{user['username']} - {user['referrals_count']} реф. ({user['privilege'].upper()})\n"
 
     await message.answer(text, parse_mode="HTML")
+    
+    # Удаляем сообщение с командой
+    from message_cleaner import message_cleaner
+    await message_cleaner.delete_command_message(message.bot, message)
 
 
 @router.message(Command("debug_ref"))
@@ -238,8 +258,6 @@ async def back_to_main(callback: CallbackQuery):
 @router.callback_query(F.data == "profile")
 async def show_profile(callback: CallbackQuery):
     try:
-        logging.info(f"🔘 Callback 'profile' от пользователя {callback.from_user.id}")
-        
         # Проверка бана
         if callback.from_user.id not in config.ADMIN_IDS:
             is_banned = await user_service.is_user_banned(callback.from_user.id)
