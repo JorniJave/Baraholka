@@ -66,3 +66,6 @@ bot/handlers/admin/__pycache__/
 # Cursor IDE
 .cursorignore
 .cursorindexingignore
+
+# Старые версии проекта
+барахолка/
