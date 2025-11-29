@@ -63,3 +63,6 @@ bot/handlers/admin/__pycache__/
 *.bak
 *.backup
 
+# Cursor IDE
+.cursorignore
+.cursorindexingignore
