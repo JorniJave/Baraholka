@@ -71,10 +71,11 @@ def admin_menu():
 
 
 def ticket_status_keyboard():
+    """Клавиатура для выбора статуса тикетов"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🆕 Новые", callback_data="tickets_new")],
-            [InlineKeyboardButton(text="🔄 В работе", callback_data="tickets_in_progress")],
+            [InlineKeyboardButton(text="🆕 Новые тикеты", callback_data="tickets_new")],
+            [InlineKeyboardButton(text="🔄 Тикеты в работе", callback_data="tickets_in_progress")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_main")]
         ]
     )
@@ -134,8 +135,21 @@ def my_tickets_keyboard(tickets):
 
 
 def admin_tickets_list_keyboard(tickets):
-    """Алиас для удобства"""
-    return tickets_list_keyboard(tickets, is_admin=True, back_callback="admin_main")
+    """Клавиатура списка тикетов для админа"""
+    keyboard = []
+    for ticket in tickets:
+        status_icon = "🆕" if ticket.status == "new" else "🔄" if ticket.status == "in_progress" else "✅"
+        
+        # Добавляем приоритет к тексту кнопки
+        priority = get_ticket_priority(ticket.theme)
+        priority_icon = get_priority_icon(priority)
+        
+        button_text = f"{priority_icon} {status_icon} #{ticket.id} - {ticket.theme}"
+        callback_data = f"admin_view_ticket_{ticket.id}"
+        keyboard.append([InlineKeyboardButton(text=button_text, callback_data=callback_data)])
+    
+    keyboard.append([InlineKeyboardButton(text="◀️ Назад к статусам", callback_data="admin_tickets")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def ticket_actions_keyboard(ticket_id, is_admin=False):

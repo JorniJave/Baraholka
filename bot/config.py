@@ -17,11 +17,30 @@ logger = logging.getLogger(__name__)
 
 # Загружаем .env файл с явным указанием пути
 if ENV_FILE.exists():
-    load_dotenv(ENV_FILE)
+    result = load_dotenv(ENV_FILE, override=True, encoding='utf-8')
+    logger.info(f"✅ Загружен .env файл из {ENV_FILE}, результат: {result}")
+    # Отладочная информация
+    import os
+    test_token = os.getenv("BOT_TOKEN")
+    if test_token:
+        logger.info(f"✅ BOT_TOKEN успешно загружен (длина: {len(test_token)})")
+    else:
+        logger.warning(f"⚠️  BOT_TOKEN не найден после загрузки .env")
+        # Пробуем прочитать напрямую из файла
+        try:
+            with open(ENV_FILE, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('BOT_TOKEN='):
+                        token = line.split('=', 1)[1].strip()
+                        os.environ['BOT_TOKEN'] = token
+                        logger.info(f"✅ BOT_TOKEN установлен напрямую из файла")
+                        break
+        except Exception as e:
+            logger.error(f"❌ Ошибка чтения .env файла: {e}")
 else:
     # Пробуем загрузить из текущей директории (для обратной совместимости)
     logger.warning(f"⚠️  .env файл не найден по пути {ENV_FILE}, пробую загрузить из текущей директории")
-    load_dotenv()
+    load_dotenv(override=True, encoding='utf-8')
 
 
 class Config:

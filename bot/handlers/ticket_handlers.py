@@ -320,10 +320,30 @@ async def user_start_chat(callback: CallbackQuery, state: FSMContext):
             await callback.answer("❌ Тикет не найден", show_alert=True)
             return
 
-        # Обновляем статус тикета на "в работе" если он еще новый
-        if ticket.status == "new":
+        # Обновляем тикет из БД, чтобы получить актуальный admin_id
+        ticket = await ticket_service.get_ticket_by_id(ticket_id)
+        
+        # Если admin_id все еще None, пытаемся найти его из тикетов в работе
+        if not ticket.admin_id:
+            in_progress_tickets = await ticket_service.get_tickets_by_status("in_progress")
+            for t in in_progress_tickets:
+                if t.id == ticket_id and t.admin_id:
+                    ticket.admin_id = t.admin_id
+                    # Обновляем тикет в БД
+                    await ticket_service.update_ticket_status(ticket_id, "in_progress", t.admin_id)
+                    break
+        
+        # Если admin_id все еще None, это проблема
+        if not ticket.admin_id:
+            await callback.answer("❌ Ошибка: администратор не назначен на тикет. Попросите администратора отправить приглашение заново.", show_alert=True)
+            logging.error(f"Тикет #{ticket_id} принят в чат, но admin_id не установлен")
+            return
+        
+        # Убеждаемся, что тикет в работе
+        if ticket.status != "in_progress":
             await ticket_service.update_ticket_status(ticket_id, "in_progress", ticket.admin_id)
-
+        
+        # Сохраняем данные чата
         await state.update_data(
             active_chat_ticket_id=ticket_id,
             active_chat_admin_id=ticket.admin_id,
@@ -343,12 +363,16 @@ async def user_start_chat(callback: CallbackQuery, state: FSMContext):
         # Уведомляем админа, что пользователь принял приглашение
         if ticket.admin_id:
             try:
+                from handlers.admin.tickets import format_user_display
+                user_display = format_user_display(callback.from_user.username, callback.from_user.id)
+                
                 await callback.bot.send_message(
                     ticket.admin_id,
                     f"✅ <b>Пользователь принял приглашение в чат</b>\n"
-                    f"Тикет: #{ticket_id}\n"
-                    f"Пользователь: @{callback.from_user.username or 'без username'}\n\n"
-                    f"<i>Теперь вы можете общаться в реальном времени</i>",
+                    f"🎫 Тикет: #{ticket_id}\n"
+                    f"👤 Пользователь: {user_display}\n\n"
+                    f"💬 <i>Теперь вы можете общаться в реальном времени</i>\n"
+                    f"Отправляйте сообщения - они будут пересылаться пользователю.",
                     reply_markup=active_chat_keyboard(ticket_id, is_admin=True),
                     parse_mode="HTML"
                 )
@@ -404,24 +428,72 @@ async def process_user_chat_message(message: Message, state: FSMContext):
         ticket_id = data.get('active_chat_ticket_id')
         admin_id = data.get('active_chat_admin_id')
 
+        # Если данные отсутствуют в state, пытаемся восстановить из БД
         if not ticket_id or not admin_id:
+            # Ищем активный тикет пользователя со статусом in_progress
+            user_tickets = await ticket_service.get_user_tickets(message.from_user.id)
+            active_ticket = None
+            for ticket in user_tickets:
+                if ticket.status == "in_progress" and ticket.admin_id:
+                    active_ticket = ticket
+                    break
+            
+            if active_ticket:
+                ticket_id = active_ticket.id
+                admin_id = active_ticket.admin_id
+                await state.update_data(
+                    active_chat_ticket_id=ticket_id,
+                    active_chat_admin_id=admin_id,
+                    chat_active=True
+                )
+                logging.info(f"Восстановлены данные чата пользователя из БД: TicketID={ticket_id}, AdminID={admin_id}")
+            else:
+                from message_cleaner import message_cleaner
+                from keyboards import main_menu
+                from config import config
+                await message_cleaner.send_temp_message(
+                    message.bot,
+                    message.from_user.id,
+                    "❌ Чат был закрыт. Вы вернулись в главное меню.",
+                    delete_after=5
+                )
+                await message.bot.send_message(
+                    message.from_user.id,
+                    "🏠 Главное меню",
+                    reply_markup=main_menu(message.from_user.id, config.ADMIN_IDS)
+                )
+                await state.clear()
+                return
+
+        # Проверяем, что тикет все еще активен
+        ticket = await ticket_service.get_ticket_by_id(ticket_id)
+        if not ticket or ticket.status != "in_progress" or ticket.admin_id != admin_id:
             from message_cleaner import message_cleaner
+            from keyboards import main_menu
+            from config import config
             await message_cleaner.send_temp_message(
                 message.bot,
                 message.from_user.id,
-                "❌ Ошибка: чат не найден",
+                "❌ Чат был закрыт. Вы вернулись в главное меню.",
                 delete_after=5
+            )
+            await message.bot.send_message(
+                message.from_user.id,
+                "🏠 Главное меню",
+                reply_markup=main_menu(message.from_user.id, config.ADMIN_IDS)
             )
             await state.clear()
             return
 
         # Отправляем сообщение админу
         try:
-            await message.bot.send_message(
+            sent_message = await message.bot.send_message(
                 admin_id,
                 f"👤 <b>Пользователь</b> (@{message.from_user.username or 'без username'}):\n{message.text}",
+                reply_markup=active_chat_keyboard(ticket_id, is_admin=True),
                 parse_mode="HTML"
             )
+            logging.info(f"✅ Сообщение от пользователя {message.from_user.id} отправлено админу {admin_id}, TicketID={ticket_id}, MessageID={sent_message.message_id}")
 
             # Сохраняем сообщение в истории тикета
             await ticket_service.add_message_to_ticket(
@@ -466,25 +538,35 @@ async def user_end_chat(callback: CallbackQuery, state: FSMContext):
     """Пользователь завершает чат"""
     try:
         ticket_id = int(callback.data.split("_")[2])
+        ticket = await ticket_service.get_ticket_by_id(ticket_id)
 
-        # Уведомляем админа о завершении чата
+        # Получаем admin_id из тикета или state
         data = await state.get_data()
-        admin_id = data.get('active_chat_admin_id')
+        admin_id = data.get('active_chat_admin_id') or (ticket.admin_id if ticket else None)
 
+        # Уведомляем админа о завершении чата и возвращаем в админ-панель
         if admin_id:
             try:
+                from keyboards import admin_menu
                 await callback.bot.send_message(
                     admin_id,
                     f"💬 <b>Пользователь завершил чат</b>\n"
-                    f"Тикет: #{ticket_id}",
+                    f"Тикет: #{ticket_id}\n"
+                    f"Пользователь: @{callback.from_user.username or 'без username'} (ID: {callback.from_user.id})",
+                    reply_markup=admin_menu(),
                     parse_mode="HTML"
                 )
-
+                logging.info(f"Админ {admin_id} уведомлен о завершении чата пользователем {callback.from_user.id}")
             except Exception as e:
                 logging.error(f"Не удалось уведомить админа о завершении чата: {e}")
 
+        from keyboards import main_menu
+        from config import config
+        
         await callback.message.edit_text(
-            "💬 <b>Чат завершен</b>",
+            "💬 <b>Чат завершен</b>\n\n"
+            "Вы вернулись в главное меню.",
+            reply_markup=main_menu(callback.from_user.id, config.ADMIN_IDS),
             parse_mode="HTML"
         )
         await state.clear()
