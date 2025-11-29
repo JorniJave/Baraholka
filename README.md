@@ -289,37 +289,189 @@ Get-Process python | Stop-Process -Force
 
 ### Развертывание на Linux сервере
 
-📖 **Подробная инструкция:** [DEPLOYMENT_LINUX.md](DEPLOYMENT_LINUX.md)
+#### 📋 Требования
 
-Инструкция включает:
-- Установку и настройку окружения
-- Настройку systemd для автозапуска
-- Управление ботом через systemctl
-- Резервное копирование
-- Мониторинг и решение проблем
+- Linux сервер (Ubuntu/Debian/CentOS)
+- Python 3.10 или выше
+- Права суперпользователя (sudo)
+- Git
 
-**Быстрый старт на Linux:**
+#### 🚀 Пошаговая инструкция
+
+**1. Подготовка сервера**
 
 ```bash
-# Клонировать репозиторий
+# Обновление системы (Ubuntu/Debian)
+sudo apt update
+sudo apt upgrade -y
+
+# Установка Python и необходимых пакетов
+sudo apt install -y python3 python3-pip python3-venv git
+
+# Проверка версии Python (должна быть 3.10+)
+python3 --version
+```
+
+**2. Создание пользователя для бота (рекомендуется)**
+
+```bash
+# Создать пользователя
+sudo useradd -m -s /bin/bash baraholka
+
+# Переключиться на пользователя
+sudo su - baraholka
+```
+
+**3. Клонирование репозитория**
+
+```bash
+cd ~
 git clone https://github.com/JorniJave/Baraholka.git
 cd Baraholka/bot
+```
 
+**4. Настройка виртуального окружения**
+
+```bash
 # Создать виртуальное окружение
 python3 -m venv venv
+
+# Активировать виртуальное окружение
 source venv/bin/activate
+
+# Обновить pip
+pip install --upgrade pip
 
 # Установить зависимости
 pip install -r requirements.txt
+```
 
-# Настроить .env файл
+**5. Настройка переменных окружения**
+
+```bash
+# Создать файл .env
 nano .env
+```
 
-# Запустить бота
+Добавьте в файл:
+
+```env
+# Токен бота от @BotFather
+BOT_TOKEN=your_bot_token_here
+
+# ID администраторов (через запятую, без пробелов)
+ADMIN_IDS=123456789,987654321
+
+# ID канала для публикации объявлений (начинается с -100)
+CHANNEL_ID=-1001234567890
+```
+
+Сохраните файл и установите права: `chmod 600 .env`
+
+**6. Тестовый запуск**
+
+```bash
+source venv/bin/activate
 python3 bot.py
 ```
 
-**Для production рекомендуется использовать systemd** - см. [DEPLOYMENT_LINUX.md](DEPLOYMENT_LINUX.md)
+Если бот запустился успешно, остановите его: `Ctrl+C`
+
+**7. Настройка systemd для автозапуска**
+
+Создайте файл сервиса:
+
+```bash
+sudo nano /etc/systemd/system/baraholka-bot.service
+```
+
+Добавьте содержимое (замените пути на ваши):
+
+```ini
+[Unit]
+Description=Baraholka Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=baraholka
+Group=baraholka
+WorkingDirectory=/home/baraholka/Baraholka/bot
+Environment="PATH=/home/baraholka/Baraholka/bot/venv/bin"
+ExecStart=/home/baraholka/Baraholka/bot/venv/bin/python3 bot.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/baraholka/Baraholka/bot/baraholka.log
+StandardError=append:/home/baraholka/Baraholka/bot/baraholka.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Активируйте сервис:
+
+```bash
+# Перезагрузить systemd
+sudo systemctl daemon-reload
+
+# Включить автозапуск при загрузке системы
+sudo systemctl enable baraholka-bot.service
+
+# Запустить сервис
+sudo systemctl start baraholka-bot.service
+
+# Проверить статус
+sudo systemctl status baraholka-bot.service
+```
+
+**8. Управление ботом**
+
+```bash
+# Просмотр статуса
+sudo systemctl status baraholka-bot.service
+
+# Остановка
+sudo systemctl stop baraholka-bot.service
+
+# Запуск
+sudo systemctl start baraholka-bot.service
+
+# Перезапуск
+sudo systemctl restart baraholka-bot.service
+
+# Просмотр логов
+sudo journalctl -u baraholka-bot.service -f
+```
+
+**9. Обновление бота**
+
+```bash
+sudo systemctl stop baraholka-bot.service
+cd ~/Baraholka
+git pull origin main
+cd bot
+source venv/bin/activate
+pip install -r requirements.txt
+sudo systemctl start baraholka-bot.service
+```
+
+#### 🐛 Решение проблем
+
+**Бот не запускается:**
+- Проверьте логи: `sudo journalctl -u baraholka-bot.service -n 100`
+- Проверьте файл `.env`: `cat /home/baraholka/Baraholka/bot/.env`
+- Проверьте права доступа: `ls -la /home/baraholka/Baraholka/bot/`
+
+**Ошибка "Permission denied":**
+```bash
+sudo chown -R baraholka:baraholka /home/baraholka/Baraholka
+chmod 600 /home/baraholka/Baraholka/bot/.env
+```
+
+**Бот постоянно перезапускается:**
+- Проверьте логи на ошибки: `sudo journalctl -u baraholka-bot.service -f`
+- Убедитесь, что в `.env` указаны правильные значения
+- Проверьте, не запущено ли несколько экземпляров: `ps aux | grep bot.py`
 
 ## 📄 Лицензия
 
