@@ -272,3 +272,4 @@ sudo journalctl -u baraholka-bot.service -n 100
 
 **Готово! Бот должен быть запущен и работать на сервере.**
 
+
